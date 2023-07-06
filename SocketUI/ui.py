@@ -2,7 +2,7 @@ import sys
 from PyQt5.QtWidgets import (
     QWidget, QLabel, QLineEdit, 
     QTextEdit, QGridLayout, QApplication, QPushButton,
-    QListWidget, QListWidgetItem
+    QListWidget, QListWidgetItem, QMessageBox
 )
 
 
@@ -80,7 +80,22 @@ class SocketToolsUI(QWidget):
             self.grid.replaceWidget(self.stopBtn, self.startBtn)
             self.startBtn.show()
             self.stopBtn.hide()
-
+            
+    def alert_error(self, *exceptions):
+        def _try(func, E):
+            def _subfunc():
+                try:
+                    return func()
+                except E as e:
+                    QMessageBox.critical(self, E.__name__, str(e))  
+            return _subfunc
+        def wrap(func):
+            if exceptions:
+                for E in exceptions:
+                    func = _try(func, E)
+            return func
+        return wrap
+    
 if __name__ == "__main__":
     app = QApplication(sys.argv)
     form = SocketToolsUI()
