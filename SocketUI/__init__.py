@@ -8,12 +8,14 @@ from types import FunctionType
 from .ui import SocketToolsUI
 logging.getLogger ().setLevel (logging.INFO)
 
+CHECK_ALIVE_INTERVAL = 10
+
 class Server(Thread):
-    def __init__(self, ip, port, event, onRecv=None, onOneJoin=None, onOneLeave=None) -> None:
+    def __init__(self, ip, port, event: Event, onRecv=None, onOneJoin=None, onOneLeave=None) -> None:
         super().__init__()
         self.event = event
         self.sk = socket.socket()
-        self.conns = [] # type: list[socket.socket]
+        self.conns = [] # type: list[tuple[socket.socket, socket._RetAddress]]
         self.sk.bind((ip, port))
         self.onRecv = onRecv
         self.onOneJoin = onOneJoin
@@ -21,6 +23,17 @@ class Server(Thread):
         
     def run(self):
         self.event.set()
+        
+        def filter_alive():
+            while self.event.is_set():
+                time.sleep(CHECK_ALIVE_INTERVAL)
+                for conn, addr in self.conns[::-1]:
+                    try:
+                        conn.send(b" ")
+                    except:
+                        if self.onOneLeave:
+                            self.onOneLeave(str(addr))
+                        self.conns.remove((conn, addr))
         
         def add_recver(conn: socket.socket, addr):
             def recver():
@@ -30,7 +43,7 @@ class Server(Thread):
                         continue
                     msg = ret.decode('utf-8').strip()
                     if msg and self.onRecv:
-                        self.onRecv(addr, msg)
+                        self.onRecv(":".join(map(str, addr)), msg)
             t = Thread(target=recver)
             t.start()
         
@@ -41,27 +54,30 @@ class Server(Thread):
                 add_recver(conn, addr)
                 if self.onOneJoin:
                     self.onOneJoin(addr)
-                self.conns.append(conn)
+                self.conns.append((conn, addr))
                 
         self.sk.listen()
-        t_conner = Thread(target=conn_listener)
-        t_conner.start()
+        for f in (conn_listener, filter_alive):
+            t = Thread(target=f)
+            t.start()
     
     def send(self, data: str):
         msg = data.encode("utf8")
-        for conn in self.conns[::-1]:
+        for conn, addr in self.conns[::-1]:
             try:
                 conn.send(msg)
+                logging.info(f"===> {addr}")
             except BrokenPipeError:
                 if leave := self.onOneLeave:
-                    leave(conn.getsockname())
-                self.conns.remove(conn)
-
+                    leave(str(conn.getpeername()))
+                self.conns.remove((conn, addr))
+    
     def close(self):
         self.event.clear()
-        for conn in self.conns:
+        for conn, addr in self.conns:
             conn.close()
         self.sk.close()
+        self.conns = []
 
 class SocketTools:
     def __init__(self, args) -> None:
