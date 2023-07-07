@@ -1,65 +1,83 @@
 import socket
 import logging
 from PyQt5.QtWidgets import QApplication
-from threading import Thread, Event
+from threading import Thread, Lock
 import time
-from types import FunctionType
+import selectors
+import sys
 
 from .ui import SocketToolsUI
-logging.getLogger ().setLevel (logging.INFO)
+logging.getLogger().setLevel(logging.DEBUG)
 
 CHECK_ALIVE_INTERVAL = 10
 
 class Server(Thread):
-    def __init__(self, ip, port, event: Event, onRecv=None, onOneJoin=None, onOneLeave=None) -> None:
+    def __init__(self, ip, port, flag, 
+                onRecv=None, onOneJoin=None,
+                onOneLeave=None) -> None:
         super().__init__()
-        self.event = event
-        self.sk = socket.socket()
+        self.flag = flag
+        self.sel = selectors.DefaultSelector()
+
+        self.ip = ip
+        self.port = port
         self.conns = [] # type: list[tuple[socket.socket, socket._RetAddress]]
-        self.sk.bind((ip, port))
         self.onRecv = onRecv
         self.onOneJoin = onOneJoin
         self.onOneLeave = onOneLeave
-        
+        self.sk = socket.socket()
+        self.sk.bind((self.ip, self.port))
+
     def run(self):
-        self.event.set()
+        # sk = socket.socket()
+        sk = self.sk
+        sk.setblocking(False)
+        sk.settimeout(0.0)
+        self.sel.register(
+            sk,
+            selectors.EVENT_READ,
+            self.accept
+        )
         
-        def filter_alive():
-            while self.event.is_set():
-                time.sleep(CHECK_ALIVE_INTERVAL)
-                for conn, addr in self.conns[::-1]:
-                    try:
-                        conn.send(b" ")
-                    except:
-                        if self.onOneLeave:
-                            self.onOneLeave(str(addr))
-                        self.conns.remove((conn, addr))
+        sk.listen()
+        while self.flag['status']:
+            for k, mask in self.sel.select(0.2):
+                cb = k.data
+                cb(k.fileobj, mask)
+        for conn, addr in self.conns:
+            conn.close()
+        self.conns = []
+        sk.close()
+        del sk
         
-        def add_recver(conn: socket.socket, addr):
-            def recver():
-                while self.event.is_set():
-                    ret = conn.recv(4096)
-                    if not ret:
-                        continue
-                    msg = ret.decode('utf-8').strip()
-                    if msg and self.onRecv:
-                        self.onRecv(":".join(map(str, addr)), msg)
-            t = Thread(target=recver)
-            t.start()
-        
-        def conn_listener():
-            while self.event.is_set():
-                conn, addr = self.sk.accept()
-                logging.info(f"connect: {addr}")            
-                add_recver(conn, addr)
-                if self.onOneJoin:
-                    self.onOneJoin(addr)
-                self.conns.append((conn, addr))
-                
-        self.sk.listen()
-        for f in (conn_listener, filter_alive):
-            t = Thread(target=f)
-            t.start()
+    def accept(self, conn: socket.socket, mask):
+        try:
+            conn, addr = conn.accept()
+            conn.setblocking(False)
+            self.sel.register(conn, selectors.EVENT_READ, self.read)
+            if call := self.onOneJoin:
+                call(addr)
+            self.conns.append((conn, addr))
+        except:
+            pass
+    
+    def read(self, conn: socket.socket, mask):
+        data = conn.recv(4096)
+        addr = None
+        for _conn, _addr in self.conns:
+            if _conn is conn:
+                addr = _addr
+                break
+        if data:
+            msg = data.decode("utf8").strip()
+            if (call := self.onRecv) and addr:
+                call(addr, msg)
+        else:
+            self.sel.unregister(conn)
+            self.conns.remove((conn, addr))
+            if call := self.onOneLeave:
+                call(addr)
+            conn.close()
     
     def send(self, data: str):
         msg = data.encode("utf8")
@@ -73,51 +91,60 @@ class Server(Thread):
                 self.conns.remove((conn, addr))
     
     def close(self):
-        self.event.clear()
-        for conn, addr in self.conns:
-            conn.close()
-        self.sk.close()
-        self.conns = []
+        self.flag['status'] = False
+
+def getIp():
+    hostname = socket.gethostname()
+    ip = socket.gethostbyname(hostname)
+    return ip
 
 class SocketTools:
-    def __init__(self, args) -> None:
+    def __init__(self, args=sys.argv) -> None:
         self.app = QApplication(args)
         self.ui = SocketToolsUI()
         self.ui.show()
         self.server = None      # type: None | Server
-        
+                
     def start_ip_listener(self):
         def ip_listener():
             while True:
-                hostname = socket.gethostname()
-                ip = socket.gethostbyname(hostname)
-                self.ui.ipLabel.setText(str(ip))
+                self.ui.ipLabel.setText(getIp())
                 time.sleep(1)
         t = Thread(target=ip_listener)
         t.start()
     
     def exec(self):
         self.start_ip_listener()
-        
-        @self.ui.alert_error(OSError)
+        flag = {
+            "status": True
+        }
+        @self.ui.alert_error(OSError, error_callback=lambda _: self.ui.update(False))
         def onStart(*args, **kwargs):
             logging.info("start socket server")
             if self.server is not None:
                 self.server.close()
+                self.server.join()
+                self.server = None
+            flag["status"] = True
+            port = self.ui.get_port()
             self.server = Server(
                 "0.0.0.0",
-                self.ui.get_port(),
-                event=Event(),
+                port,
+                flag,
                 onRecv=self.ui.add_history_recv_msg,
                 onOneJoin=self.ui.add_history_one_connect,
                 onOneLeave=self.ui.add_history_one_disconnect
             )
             self.server.start()
+            self.ui.add_history_on_server_start((getIp(), port))
             
         def onStop(*args, **kwargs):
             logging.info("stop socket server")
             if self.server is not None:
                 self.server.close()
+                self.server.join()
+                self.ui.add_history_on_server_stop((getIp(), self.server.port))
+                self.server = None
         
         def onSend(*args, **kwargs):
             if self.server:
@@ -131,9 +158,7 @@ class SocketTools:
         return self.app.exec_()
 
 def run():
-    import sys
-    app = SocketTools(sys.argv)
+    app = SocketTools()
     status = app.exec()
-    if app.server:
-        app.server.close()
-    sys.exit(status)
+    del app
+    return status

@@ -12,7 +12,7 @@ setup(
     author       =  "miaobuao",
     url          =  "https://github.com/miaobuao/SocketUI",
     description  =  desc,
-    version      =  '0.0.1',
+    version      =  '0.0.2',
     license      =  "MIT License",
     author_email =  "miaobuao@outlook.com",
     packages     = find_packages(),

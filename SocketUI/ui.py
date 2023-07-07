@@ -4,10 +4,13 @@ from PyQt5.QtWidgets import (
     QTextEdit, QGridLayout, QApplication, QPushButton,
     QListWidget, QListWidgetItem, QMessageBox
 )
+import traceback
+import logging
 
+logging.getLogger ().setLevel(logging.INFO)
 
 class SocketToolsUI(QWidget):
-    def __init__(self, parent=None, title='SocketTools'):
+    def __init__(self, parent=None, title='Socket UI'):
         super(SocketToolsUI, self).__init__(parent)
         self.started = False
 
@@ -22,11 +25,9 @@ class SocketToolsUI(QWidget):
         self.msgEdit = QTextEdit()
         
         def onStart():
-            self.started = True
-            self.update()
+            self.update(True)
         def onStop():
-            self.started = False
-            self.update()
+            self.update(False)
     
         self.startBtn.clicked.connect(onStart)
         self.stopBtn.clicked.connect(onStop)
@@ -51,7 +52,7 @@ class SocketToolsUI(QWidget):
         self.setWindowTitle(title)
         
     def add_history(self, data: str):
-        self.historyView.addItem(QListWidgetItem(data))
+        self.historyView.insertItem(0, QListWidgetItem(data))
         
     def add_history_one_connect(self, addr):
         self.add_history(f"connect: {addr}")
@@ -60,10 +61,16 @@ class SocketToolsUI(QWidget):
         self.add_history(f"disconnect: {addr}")
     
     def add_history_recv_msg(self, addr, msg):
-        self.add_history(f"[{addr}]: {msg}")
+        self.add_history(f"[{addr[0]}:{addr[1]}]: {msg}")
     
     def add_history_send_msg(self, msg):
         self.add_history(f"> {msg}")
+        
+    def add_history_on_server_start(self, addr):
+        self.add_history(f"Server > START: {addr[0]}:{addr[1]}")
+        
+    def add_history_on_server_stop(self, addr):
+        self.add_history(f"Server > STOP: {addr[0]}:{addr[1]}")
         
     def get_msg(self):
         return self.msgEdit.toPlainText()
@@ -71,8 +78,9 @@ class SocketToolsUI(QWidget):
     def get_port(self):
         return int(self.portEdit.text())
     
-    def update(self):
-        if self.started:
+    def update(self, started):
+        self.started = started
+        if started:
             self.grid.replaceWidget(self.startBtn, self.stopBtn)
             self.startBtn.hide()
             self.stopBtn.show()
@@ -81,13 +89,16 @@ class SocketToolsUI(QWidget):
             self.startBtn.show()
             self.stopBtn.hide()
             
-    def alert_error(self, *exceptions):
+    def alert_error(self, *exceptions, error_callback=None):
         def _try(func, E):
-            def _subfunc():
+            def _subfunc(*args, **kwargs):
                 try:
                     return func()
-                except E as e:
-                    QMessageBox.critical(self, E.__name__, str(e))  
+                except Exception as e:
+                    QMessageBox.critical(self, E.__name__, str(e))
+                    if error_callback:
+                        error_callback(e)
+                    logging.debug(traceback.format_exc())
             return _subfunc
         def wrap(func):
             if exceptions:
